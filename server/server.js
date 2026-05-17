@@ -16,8 +16,11 @@ app.use(bodyParser.json());
 app.use(session({
   secret: config.sessionSecret,
   resave: false,
-  saveUninitialized: true,
-  cookie: { secure: false } // Set to true if using HTTPS
+  saveUninitialized: false,
+  cookie: {
+    secure: false,
+    sameSite: "lax"
+  }
 }));
 
 // Serve static content in directory 'files'
@@ -33,9 +36,11 @@ app.post("/login", function (req, res) {
       lastName: user.lastName,
       loginTime: new Date().toISOString(),
     };
-    res.send(req.session.user);
+    req.session.save(() => {
+      res.send(req.session.user);
+    })
   } else {
-    res.sendStatus(401);
+    return res.sendStatus(401);
   }
 });
 
@@ -43,16 +48,28 @@ app.post("/login", function (req, res) {
 // protection. Implement logout by destroying the session 
 // with error handling. Protect all endpoints that need 
 // authentication with `requireLogin`.
-
-app.get("/session", function (req, res) {
-  if (req.session.user) {
-    res.send(req.session.user);
-  } else {
-    res.status(401).json(null);
+function requireLogin(req, res, next) {
+  if (!req.session.user) {
+    return res.sendStatus(401);
   }
+
+  next();
+}
+app.get("/logout", requireLogin, (req, res) => {
+  req.session.destroy((err) => {
+    if (err) {
+      return res.sendStatus(500);
+    }
+
+    res.sendStatus(200);
+  });
 });
 
-app.get("/movies", function (req, res) {
+app.get("/session", function (req, res) {
+  res.send(req.session.user || null);
+});
+
+app.get("/movies", requireLogin, function (req, res) {
   const username = req.session.user.username;
   let movies = Object.values(movieModel.getUserMovies(username));
   const queriedGenre = req.query.genre;
@@ -63,7 +80,7 @@ app.get("/movies", function (req, res) {
 });
 
 // Configure a 'get' endpoint for a specific movie
-app.get("/movies/:imdbID", function (req, res) {
+app.get("/movies/:imdbID", requireLogin, function (req, res) {
   const username = req.session.user.username;
   const id = req.params.imdbID;
   const movie = movieModel.getUserMovie(username, id);
@@ -76,7 +93,7 @@ app.get("/movies/:imdbID", function (req, res) {
 });
 
 // Configure a 'put' endpoint for a specific movie to update or insert a movie
-app.put("/movies/:imdbID", function (req, res) {
+app.put("/movies/:imdbID", requireLogin, function (req, res) {
   const username = req.session.user.username;
   const imdbID = req.params.imdbID;
   const exists = movieModel.getUserMovie(username, imdbID) !== undefined;
@@ -85,13 +102,71 @@ app.put("/movies/:imdbID", function (req, res) {
     // Task 2.3: Fetch the movie data from OmdbAPI, follow the pattern used further down 
     // in the GET /search endpoint. Implement conversion of the OmdbAPI response to the 
     // movie format used in the frontend. Make sure to handle errors and timeouts properly.
+    const url = `http://www.omdbapi.com/?i=${imdbID}&apikey=${config.omdbApiKey}`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.omdbTimeoutMs);
+
+    fetch(url, { signal: controller.signal })
+      .then(apiRes => {
+        clearTimeout(timeoutId);
+
+        if (!apiRes.ok) {
+          return res.sendStatus(apiRes.status);
+        }
+
+        return apiRes.json();
+      })
+      .then(movieData => {
+
+        if (!movieData || movieData.Response === "False") {
+          return res.sendStatus(404);
+        }
+
+
+        const movie = {
+          imdbID: movieData.imdbID,
+          Title: movieData.Title,
+          Released: movieData.Released || null, // Stores full date string like "2003-12-16"
+          Runtime: movieData.Runtime ? parseInt(movieData.Runtime, 10) : null, // Converts "116 min" -> 116
+          Genres: movieData.Genre ? movieData.Genre.split(", ").filter(Boolean) : [],
+          Directors: movieData.Director ? movieData.Director.split(", ").filter(Boolean) : [],
+          Writers: movieData.Writer ? movieData.Writer.split(", ").filter(Boolean) : [], // Note: OMDb API uses singular .Writer
+          Actors: movieData.Actors ? movieData.Actors.split(", ").filter(Boolean) : [],
+          Plot: movieData.Plot || "",
+          Poster: movieData.Poster || "",
+          Metascore: movieData.Metascore ? parseInt(movieData.Metascore, 10) : null,
+          imdbRating: movieData.imdbRating ? parseFloat(movieData.imdbRating) : null
+        };
+        movieModel.setUserMovie(username, imdbID, movie);
+
+        res.sendStatus(201);
+      })
+      .catch(err => {
+        clearTimeout(timeoutId);
+
+        if (err.name === "AbortError") {
+          console.error("OMDb timeout");
+          return res.sendStatus(504);
+        }
+
+        console.error("OMDb error:", err);
+        res.sendStatus(500);
+      });
+
   } else {
-    movieModel.setUserMovie(username, imdbID, req.body);
-    res.sendStatus(200);
+    const editedMovie = req.body;
+
+    if (!editedMovie) {
+      return res.sendStatus(400);
+    }
+
+    movieModel.setUserMovie(username, imdbID, editedMovie);
+    return res.sendStatus(200);
   }
 });
 
-app.delete("/movies/:imdbID", function (req, res) {
+app.delete("/movies/:imdbID", requireLogin, function (req, res) {
   const username = req.session.user.username;
   const id = req.params.imdbID;
   if (movieModel.deleteUserMovie(username, id)) {
@@ -102,7 +177,7 @@ app.delete("/movies/:imdbID", function (req, res) {
 });
 
 // Configure a 'get' endpoint for genres of all movies of the current user
-app.get("/genres", function (req, res) {
+app.get("/genres", requireLogin, function (req, res) {
   const username = req.session.user.username;
   const genres = movieModel.getGenres(username);
   genres.sort();
@@ -112,7 +187,7 @@ app.get("/genres", function (req, res) {
 /* Task 2.1. Add the GET /search endpoint: Query omdbapi.com and return
    a list of the results you obtain. Only include the properties 
    mentioned in the README when sending back the results to the client. */
-app.get("/search", function (req, res) {
+app.get("/search", requireLogin, function (req, res) {
   const username = req.session.user.username;
   const query = req.query.query;
   if (!query) {

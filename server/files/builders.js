@@ -115,13 +115,27 @@ export class MovieBuilder extends ElementBuilder {
     }
 
     this.append(
-        new ParagraphBuilder().items(
-          "Runtime " + formatRuntime(movie.Runtime),
-          "\u2022",
-          "Released on " + new Date(movie.Released).toLocaleDateString("en-US")
-        )
+      new ParagraphBuilder().items(
+        "Runtime " + formatRuntime(movie.Runtime),
+        "\u2022",
+        "Released on " + new Date(movie.Released).toLocaleDateString("en-US")
       )
-      .append(new ParagraphBuilder().childClass("genre").items(movie.Genres))
+    );
+    const ratingsArray = [];
+    if (movie.imdbRating) {
+      ratingsArray.push(`⭐ IMDb: ${movie.imdbRating}/10`);
+    }
+    if (movie.Metascore) {
+      ratingsArray.push(`🎬 Metascore: ${movie.Metascore}/100`);
+    }
+
+    if (ratingsArray.length > 0) {
+      // If both exist, join them with a bullet separator
+      const ratingsText = ratingsArray.join("   \u2022   ");
+      this.append(new ElementBuilder("p").class("movie-ratings").text(ratingsText));
+    }
+
+    this.append(new ParagraphBuilder().childClass("genre").items(movie.Genres))
       .append(new ElementBuilder("p").text(movie.Plot))
       .append(new ElementBuilder("h2").pluralizedText("Director", movie.Directors))
       .append(new ListBuilder().items(movie.Directors))
